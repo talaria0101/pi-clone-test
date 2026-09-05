@@ -59,17 +59,23 @@ jobs:
           ls round* 2>/dev/null | head
       - name: fake flatpak-info + /app/bin placement
         run: |
-          # try to walk past the flatpak checks
+          set +e
+          sudo apt-get install -y -q xvfb dbus-x11 mesa-utils libgl1-mesa-dri 2>&1 | tail -1
+          export $(dbus-launch)
+          Xvfb :99 -screen 0 1280x720x24 &
+          sleep 2
+          export DISPLAY=:99
+          echo "DISPLAY=$DISPLAY DBUS=$DBUS_SESSION_BUS_ADDRESS"
           sudo mkdir -p /app/bin
           sudo cp /opt/sober/* /app/bin/ 2>/dev/null || true
           sudo chmod +x /app/bin/sober /app/bin/sober_services
           printf '[Application]\nname=org.vinegarhq.Sober\nruntime=runtime/org.freedesktop.Platform/x86_64/24.08\n[Context]\nshared=network;ipc;\nsockets=x11;wayland;pulseaudio;\ndevices=dri;\n[Instance]\ninstance-id=1\nsession-bus-proxy=true\nsystem-bus-proxy=true\n' | sudo tee /.flatpak-info >/dev/null
           cd /app/bin
-          timeout 30 sh -c ': | env FLATPAK_ID=org.vinegarhq.Sober ./sober' > /tmp/out3.txt 2>&1 || true
-          echo "=== out3"; head -60 /tmp/out3.txt
+          timeout 40 sh -c ': | env DISPLAY=:99 DBUS_SESSION_BUS_ADDRESS='$DBUS_SESSION_BUS_ADDRESS' FLATPAK_ID=org.vinegarhq.Sober ./sober' > /tmp/out3.txt 2>&1 || true
+          echo "=== out3"; head -80 /tmp/out3.txt
           rm -f /tmp/spy2.log
-          timeout 30 sh -c ': | env LD_PRELOAD=/opt/sober/spy.so ./sober' > /tmp/out4.txt 2>&1 || true
-          echo "=== out4"; head -20 /tmp/out4.txt; echo ===SPY4; sort -u /tmp/spy2.log | head -200
+          timeout 40 sh -c ': | env DISPLAY=:99 DBUS_SESSION_BUS_ADDRESS='$DBUS_SESSION_BUS_ADDRESS' LD_PRELOAD=/opt/sober/spy.so ./sober' > /tmp/out4.txt 2>&1 || true
+          echo "=== out4"; head -20 /tmp/out4.txt; echo ===SPY4; sort -u /tmp/spy2.log | head -250
       - name: scrape with process-tree walk (TracerPid capture)
         run: |
           cd /app/bin
