@@ -27,7 +27,7 @@ jobs:
           curl -sL -o s.tar.zst "${{ github.event.inputs.artifact-url }}"
           file s.tar.zst
           tar --zstd -xf s.tar.zst --strip-components=1
-          cp $GITHUB_WORKSPACE/runtime-extras/*.so* .
+          cp $GITHUB_WORKSPACE/runtime-extras/*.so* . 2>/dev/null || true
           ls -la
           echo '--- missing libs:'; ldd ./sober | grep 'not found' || echo none
       - name: build tools
