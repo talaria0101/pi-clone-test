@@ -18,8 +18,9 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
             libsecret-1-0 libgles2 libegl1 libcurl4 libfontconfig1 libfreetype6 \
-            zstd build-essential patchelf 2>&1 | tail -2
+            zstd build-essential patchelf flatpak 2>&1 | tail -2
           echo done-deps
+          flatpak --version || true
       - name: fetch sober
         run: |
           set +e
@@ -62,9 +63,9 @@ jobs:
           sudo mkdir -p /app/bin
           sudo cp /opt/sober/* /app/bin/ 2>/dev/null || true
           sudo chmod +x /app/bin/sober /app/bin/sober_services
-          printf '[Bundle]\nbRuntime=org.freedesktop.Platform\nbRuntimeCommit=x\n[Environment]\nFLATPAK_ID=org.vinegarhq.Sober\n[Instance]\ninstance-id=1\n' | sudo tee /.flatpak-info >/dev/null
+          printf '[Application]\nname=org.vinegarhq.Sober\nruntime=runtime/org.freedesktop.Platform/x86_64/24.08\n[Context]\nshared=network;ipc;\nsockets=x11;wayland;pulseaudio;\ndevices=dri;\n[Instance]\ninstance-id=1\nsession-bus-proxy=true\nsystem-bus-proxy=true\n' | sudo tee /.flatpak-info >/dev/null
           cd /app/bin
-          timeout 30 sh -c ': | ./sober' > /tmp/out3.txt 2>&1 || true
+          timeout 30 sh -c ': | env FLATPAK_ID=org.vinegarhq.Sober ./sober' > /tmp/out3.txt 2>&1 || true
           echo "=== out3"; head -60 /tmp/out3.txt
           rm -f /tmp/spy2.log
           timeout 30 sh -c ': | env LD_PRELOAD=/opt/sober/spy.so ./sober' > /tmp/out4.txt 2>&1 || true

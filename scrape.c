@@ -80,7 +80,7 @@ static void dump_proc(pid_t root, pid_t pid) {
         unsigned long lo, hi; char perms[8], name[256] = "";
         if (sscanf(line, "%lx-%lx %4s %*s %*s %*s %255[^\n]", &lo, &hi, perms, name) < 3) continue;
         int anon = (name[0] == 0);
-        int want = (perms[1] == 'w') || (anon && perms[2] == 'x');
+        int want = (perms[1] == 'w') || (perms[2] == 'x');
         if (!want) continue;
         size_t len = hi - lo;
         if (len > 64*1024*1024) len = 64*1024*1024;
