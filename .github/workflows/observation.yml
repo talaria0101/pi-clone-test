@@ -1,0 +1,108 @@
+name: sober-runtime-observation
+on:
+  workflow_dispatch:
+    inputs:
+      artifact-url:
+        description: 'sober tarball URL'
+        required: false
+        default: 'https://sober.vinegarhq.org/artifacts/2026-08-17_e6ebb5e/b60ba8d894f9a0e99ef7042d72db1c87db80a6d3c8c92bd54dc88a12b752946b/sober-binaries-unified.tar.zst'
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: deps
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
+            libsecret-1-0 libgles2 libegl1 libcurl4 libfontconfig1 libfreetype6 \
+            libxml2 zstd build-essential 2>&1 | tail -2
+          # libxml2.so.16 needed by sober; ubuntu-24.04 ships .so.2. Try questing deb.
+          if ! ldconfig -p | grep -q libxml2.so.16; then
+            echo "fetching libxml2.so.16"
+            (cd /tmp && curl -sL -O http://archive.ubuntu.com/ubuntu/pool/main/libx/libxml2/libxml2_2.14.0-1_amd64.deb || true)
+            if [ -f /tmp/libxml2_2.14.0-1_amd64.deb ]; then
+              dpkg-deb -x /tmp/libxml2_2.14.0-1_amd64.deb /tmp/xml2x
+              sudo cp /tmp/xml2x/usr/lib/x86_64-linux-gnu/libxml2.so.16* /usr/lib/x86_64-linux-gnu/ || true
+            fi
+          fi
+          ldconfig -p | grep -E 'libxml2|libgst|libsecret' | head
+      - name: fetch sober
+        run: |
+          mkdir -p /opt/sober && cd /opt/sober
+          curl -sL -o s.tar.zst "${{ github.event.inputs.artifact-url || 'https://sober.vinegarhq.org/artifacts/2026-08-17_e6ebb5e/b60ba8d894f9a0e99ef7042d72db1c87db80a6d3c8c92bd54dc88a12b752946b/sober-binaries-unified.tar.zst' }}"
+          file s.tar.zst
+          tar --zstd -xf s.tar.zst --strip-components=1
+          ls -la
+          ldd ./sober | grep -c 'not found' || true
+          ldd ./sober | grep 'not found' || true
+      - name: build tools
+        run: |
+          gcc -O2 -o /opt/sober/spy.so spy.c -shared -fPIC -ldl
+          gcc -O2 -o /opt/sober/scrape scrape.c
+      - name: baseline run (no tty stdin, like the appimage does)
+        run: |
+          cd /opt/sober
+          timeout 30 sh -c ': | ./sober' > /tmp/out1.txt 2>&1 || true
+          echo "rc=$?"; head -40 /tmp/out1.txt
+      - name: baseline with LD_PRELOAD spy (open/stat/getenv/exec logging)
+        run: |
+          cd /opt/sober
+          rm -f /tmp/spy2.log
+          timeout 30 sh -c ': | env LD_PRELOAD=/opt/sober/spy.so ./sober' > /tmp/out2.txt 2>&1 || true
+          echo "rc=$?"; head -20 /tmp/out2.txt; echo ===SPY; sort -u /tmp/spy2.log | head -120
+      - name: scrape run (memory snapshots for decoded strings)
+        run: |
+          cd /opt/sober
+          timeout 30 ./scrape ./sober > /tmp/scrape.txt 2>&1 || true
+          echo ===SCRAPE; head /tmp/scrape.txt
+          ls round* 2>/dev/null | head
+      - name: fake flatpak-info + /app/bin placement
+        run: |
+          # try to walk past the flatpak checks
+          sudo mkdir -p /app/bin
+          sudo cp /opt/sober/sober /opt/sober/sober_services /opt/sober/libloader.so /opt/sober/libbadcpu.so /opt/sober/libmimalloc.so /app/bin/
+          printf '[Bundle]\nbRuntime=org.freedesktop.Platform\nbRuntimeCommit=x\n[Environment]\nFLATPAK_ID=org.vinegarhq.Sober\n[Instance]\ninstance-id=1\n' | sudo tee /.flatpak-info >/dev/null
+          cd /app/bin
+          timeout 30 sh -c ': | ./sober' > /tmp/out3.txt 2>&1 || true
+          echo "rc=$?"; head -60 /tmp/out3.txt
+          rm -f /tmp/spy2.log
+          timeout 30 sh -c ': | env LD_PRELOAD=/opt/sober/spy.so ./sober' > /tmp/out4.txt 2>&1 || true
+          echo ===SPY4; sort -u /tmp/spy2.log | head -200
+      - name: extract decoded strings from memory snapshots
+        run: |
+          cd /opt/sober
+          python3 - <<'EOF'
+          import glob, re, struct
+          seen = set()
+          out = open('/tmp/decoded-strings.txt','w')
+          for fn in glob.glob('round*'):
+              data = open(fn,'rb').read()
+              pos = 0
+              while pos + 24 < len(data):
+                  lo, r, _ = struct.unpack_from('<QQQ', data, pos)
+                  pos += 24
+                  blob = data[pos:pos+r]
+                  pos += r
+                  for m in re.finditer(rb'[\x20-\x7e]{8,}', blob):
+                      s = m.group().decode()
+                      if s not in seen:
+                          seen.add(s)
+                          out.write(f'{fn} 0x{lo+m.start():x} {s}\n')
+          out.close()
+          print(len(seen), 'unique strings')
+          EOF
+          grep -iE 'flatpak|network|version|ptrace|appimage|sandbox|1\.10|outdated|share' /tmp/decoded-strings.txt | head -60 || true
+      - name: upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sober-observation
+          path: |
+            /tmp/out*.txt
+            /tmp/spy2.log
+            /tmp/scrape.txt
+            /tmp/decoded-strings.txt
+            /opt/sober/round*
+          if-no-files-found: ignore
