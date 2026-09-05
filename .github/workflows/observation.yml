@@ -27,7 +27,7 @@ jobs:
           curl -sL -o s.tar.zst "${{ github.event.inputs.artifact-url }}"
           file s.tar.zst
           tar --zstd -xf s.tar.zst --strip-components=1
-          cp $GITHUB_WORKSPACE/runtime-extras/*.so* . 2>/dev/null || true
+          cp $GITHUB_WORKSPACE/runtime-extras/*.so* .
           ls -la
           echo '--- missing libs:'; ldd ./sober | grep 'not found' || echo none
       - name: build tools
@@ -60,22 +60,31 @@ jobs:
         run: |
           # try to walk past the flatpak checks
           sudo mkdir -p /app/bin
-          sudo cp /opt/sober/sober /opt/sober/sober_services /opt/sober/libloader.so /opt/sober/libbadcpu.so /opt/sober/libmimalloc.so /app/bin/
+          sudo cp /opt/sober/* /app/bin/ 2>/dev/null || true
+          sudo chmod +x /app/bin/sober /app/bin/sober_services
           printf '[Bundle]\nbRuntime=org.freedesktop.Platform\nbRuntimeCommit=x\n[Environment]\nFLATPAK_ID=org.vinegarhq.Sober\n[Instance]\ninstance-id=1\n' | sudo tee /.flatpak-info >/dev/null
           cd /app/bin
           timeout 30 sh -c ': | ./sober' > /tmp/out3.txt 2>&1 || true
-          echo "rc=$?"; head -60 /tmp/out3.txt
+          echo "=== out3"; head -60 /tmp/out3.txt
           rm -f /tmp/spy2.log
           timeout 30 sh -c ': | env LD_PRELOAD=/opt/sober/spy.so ./sober' > /tmp/out4.txt 2>&1 || true
-          echo ===SPY4; sort -u /tmp/spy2.log | head -200
+          echo "=== out4"; head -20 /tmp/out4.txt; echo ===SPY4; sort -u /tmp/spy2.log | head -200
+      - name: scrape with process-tree walk (TracerPid capture)
+        run: |
+          cd /app/bin
+          timeout 30 /opt/sober/scrape ./sober > /tmp/scrape2.txt 2>&1 || true
+          cat /tmp/scrape2.txt | head -4
+          echo '--- TracerPid lines over time:'
+          cat r*.status 2>/dev/null | grep -E '^(Name|Pid|PPid|TracerPid|Seccomp|Cmdline)' | head -60
+          echo '--- statuses:'; ls r*.status 2>/dev/null | head
       - name: extract decoded strings from memory snapshots
         run: |
-          cd /opt/sober
+          cd /app/bin
           python3 - <<'EOF'
           import glob, re, struct
           seen = set()
           out = open('/tmp/decoded-strings.txt','w')
-          for fn in glob.glob('round*'):
+          for fn in glob.glob('r*.mem') + glob.glob('/opt/sober/round*'):
               data = open(fn,'rb').read()
               pos = 0
               while pos + 24 < len(data):
@@ -91,7 +100,7 @@ jobs:
           out.close()
           print(len(seen), 'unique strings')
           EOF
-          grep -iE 'flatpak|network|version|ptrace|appimage|sandbox|1\.10|outdated|share' /tmp/decoded-strings.txt | head -60 || true
+          grep -iE 'flatpak|network|ptrace|sandbox|version|appimage|share=|outdated|1\.10|yama|seccomp|portal|override' /tmp/decoded-strings.txt | head -80 || true
       - name: upload
         if: always()
         uses: actions/upload-artifact@v4
@@ -100,7 +109,9 @@ jobs:
           path: |
             /tmp/out*.txt
             /tmp/spy2.log
-            /tmp/scrape.txt
+            /tmp/scrape*.txt
             /tmp/decoded-strings.txt
+            /app/bin/r*.status
+            /app/bin/r*.mem
             /opt/sober/round*
           if-no-files-found: ignore

@@ -1,5 +1,4 @@
-// Continuous /proc/pid/mem scraper: runs target as child, periodically dumps
-// writable+exec mappings and greps memory for decoded-looking strings.
+// v2: walk all descendant pids; dump status (TracerPid!), maps; scrape writable/anon-exec memory.
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,24 +10,75 @@
 #include <errno.h>
 #include <dirent.h>
 
-static int dump_round = 0;
+static int round_no = 0;
 
-static void dump_maps(pid_t pid) {
-    char path[64];
-    snprintf(path, sizeof path, "/proc/%d/maps", pid);
-    FILE *f = fopen(path, "r");
-    if (!f) return;
+static int is_descendant(pid_t root, pid_t p) {
+    // walk /proc/p/stat ppid chain up to root
+    for (int depth = 0; depth < 12 && p > 1; depth++) {
+        if (p == root) return 1;
+        char path[64]; snprintf(path, sizeof path, "/proc/%d/stat", p);
+        FILE *f = fopen(path, "r");
+        if (!f) return 0;
+        int pid_, ppid_ = 0;
+        char comm[128];
+        if (fscanf(f, "%d (%127[^)]) %*c %d", &pid_, comm, &ppid_) < 3) { fclose(f); return 0; }
+        fclose(f);
+        if (ppid_ <= 1) break;
+        p = ppid_;
+    }
+    return p == root;
+}
+
+static void dump_proc(pid_t root, pid_t pid) {
+    char path[128], out[256];
+    snprintf(path, sizeof path, "/proc/%d/status", pid);
+    FILE *s = fopen(path, "r");
+    snprintf(out, sizeof out, "r%d_%d.status", round_no, pid);
+    FILE *o = fopen(out, "w");
+    if (s && o) {
+        char line[512];
+        while (fgets(line, sizeof line, s)) {
+            if (strncmp(line, "Name:", 5)==0 || strncmp(line, "Pid:", 4)==0 ||
+                strncmp(line, "PPid:", 5)==0 || strncmp(line, "State:", 6)==0 ||
+                strncmp(line, "TracerPid:", 10)==0 || strncmp(line, "Seccomp:", 8)==0 ||
+                strncmp(line, "Seccomp_filters:", 16)==0 || strncmp(line, "Threads:", 8)==0)
+                fputs(line, o);
+        }
+    }
+    if (s) fclose(s);
+    if (o) fclose(o);
+
+    snprintf(path, sizeof path, "/proc/%d/cmdline", pid);
+    o = fopen(out, "a");
+    if (o) {
+        FILE *c = fopen(path, "r");
+        if (c) { char buf[1024]; size_t n = fread(buf, 1, sizeof buf-1, c); fclose(c);
+                 for (size_t i = 0; i < n; i++) if (buf[i]==0) buf[i]=' ';
+                 fprintf(o, "Cmdline: %.*s\n", (int)n, buf); }
+        snprintf(path, sizeof path, "/proc/%d/maps", pid);
+        FILE *m = fopen(path, "r");
+        if (m) {
+            fprintf(o, "--- maps:\n");
+            char l[512];
+            while (fgets(l, sizeof l, m)) fputs(l, o);
+            fclose(m);
+        }
+        fclose(o);
+    }
+
+    // memory scrape
     snprintf(path, sizeof path, "/proc/%d/mem", pid);
     int mem = open(path, O_RDONLY);
+    if (mem < 0) return;
+    snprintf(path, sizeof path, "/proc/%d/maps", pid);
+    FILE *m = fopen(path, "r");
+    if (!m) { close(mem); return; }
+    snprintf(out, sizeof out, "r%d_%d.mem", round_no, pid);
+    o = fopen(out, "wb");
     char line[512];
-    char out[256];
-    snprintf(out, sizeof out, "round%d_%d", dump_round, (int)pid);
-    FILE *o = fopen(out, "wb");
-    while (fgets(line, sizeof line, f)) {
-        unsigned long lo, hi;
-        char perms[8], name[256] = "";
+    while (fgets(line, sizeof line, m)) {
+        unsigned long lo, hi; char perms[8], name[256] = "";
         if (sscanf(line, "%lx-%lx %4s %*s %*s %*s %255[^\n]", &lo, &hi, perms, name) < 3) continue;
-        // dump writable OR anonymous-exec regions (where decrypted code/strings live)
         int anon = (name[0] == 0);
         int want = (perms[1] == 'w') || (anon && perms[2] == 'x');
         if (!want) continue;
@@ -43,13 +93,10 @@ static void dump_maps(pid_t pid) {
         }
         free(buf);
     }
-    fclose(o);
-    fclose(f);
-    close(mem);
+    fclose(o); fclose(m); close(mem);
 }
 
 int main(int argc, char **argv) {
-    // argv[1] = exe, rest = args; env from SOBERENV_* not needed, pass through
     pid_t pid = fork();
     if (pid == 0) {
         setsid();
@@ -62,13 +109,20 @@ int main(int argc, char **argv) {
         _exit(127);
     }
     fprintf(stderr, "[scrape] child %d\n", pid);
-    for (int round = 0; round < 40; round++) {
-        dump_round = round;
-        dump_maps(pid);
+    for (round_no = 0; round_no < 30; round_no++) {
+        DIR *d = opendir("/proc");
+        struct dirent *de;
+        while ((de = readdir(d))) {
+            pid_t p = atoi(de->d_name);
+            if (p > 1 && (p == pid || is_descendant(pid, p)))
+                dump_proc(pid, p);
+        }
+        closedir(d);
         usleep(200000);
-        if (kill(pid, 0) != 0) break;  // dead
+        if (kill(pid, 0) != 0) break;
     }
-    kill(pid, SIGKILL);
-    waitpid(pid, NULL, 0);
+    // final wait
+    int st; waitpid(pid, &st, 0);
+    fprintf(stderr, "[scrape] child exit status %d\n", st);
     return 0;
 }
